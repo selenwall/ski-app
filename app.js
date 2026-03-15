@@ -616,6 +616,9 @@ function loadSession() {
     // Clean up jittery segments from old data
     segments = cleanupSegments(segments);
 
+    // Persist the cleaned data so we don't re-process next time
+    saveSession();
+
     // Restore map & UI
     if (positionHistory.length > 0 || segments.length > 0) {
       redrawMap();
@@ -691,7 +694,39 @@ function cleanupSegments(segs) {
     result = mergeSameState(next);
   }
 
-  // Pass 4: re-classify using overall segment data
+  // Pass 4: absorb trailing noise after DOWNHILL/LIFT into the main segment
+  // e.g. DOWNHILL → REST(34s) → REST(39s) at the base = still part of the run
+  const absorbed = [result[0]];
+  for (let i = 1; i < result.length; i++) {
+    const seg = result[i];
+    const prev = absorbed[absorbed.length - 1];
+    const segAlts = (seg.positions || []).filter(p => p.alt != null).map(p => p.alt);
+    const segAltChange = segAlts.length >= 2 ? Math.abs(segAlts[segAlts.length - 1] - segAlts[0]) : 0;
+
+    // If previous segment was a real activity (DOWNHILL or LIFT) and this segment
+    // has negligible altitude change, absorb it as the tail end of that activity
+    if ((prev.state === STATES.DOWNHILL || prev.state === STATES.LIFT) &&
+        seg.state === STATES.REST && segAltChange < MIN_LIFT_ALT_GAIN) {
+      // Check if there's a NEXT segment with a different real activity —
+      // if so, this REST is a genuine break between activities, keep it
+      const next = result[i + 1];
+      const isGenuineBreak = next &&
+        next.state !== prev.state &&
+        next.state !== STATES.REST &&
+        ((next.endTime || 0) - (next.startTime || 0)) > MIN_SEGMENT_DURATION;
+
+      if (isGenuineBreak) {
+        absorbed.push(seg);
+      } else {
+        absorbSegment(prev, seg);
+      }
+    } else {
+      absorbed.push(seg);
+    }
+  }
+  result = absorbed;
+
+  // Pass 5: re-classify using overall segment data
   for (const seg of result) {
     if (!seg.positions || seg.positions.length < 3) continue;
     const alts = seg.positions.filter(p => p.alt != null).map(p => p.alt);
@@ -712,7 +747,7 @@ function cleanupSegments(segs) {
     }
   }
 
-  // Pass 5: final same-state merge
+  // Pass 6: final same-state merge
   return mergeSameState(result);
 }
 
