@@ -4,9 +4,10 @@ const STATES = { REST: 'rest', LIFT: 'lift', DOWNHILL: 'downhill' };
 
 // Thresholds for automatic state detection
 const SPEED_MOVING = 2.5;       // km/h — above this you're not resting
-const SPEED_DOWNHILL = 10;      // km/h — above this while descending = downhill
+const SPEED_DOWNHILL = 20;      // km/h — must be clearly skiing speed (lifts can do ~16 km/h)
 const ALT_CHANGE_THRESHOLD = 5; // meters over sample window to count as ascending/descending
 const SAMPLE_WINDOW = 8;        // number of recent positions to average altitude change
+const TREND_WINDOW = 15;        // broader window for overall altitude trend
 const DEBOUNCE_COUNT = 3;       // consecutive readings needed before state change
 const MIN_SEGMENT_DURATION = 15000; // 15s — segments shorter than this get merged back
 
@@ -189,18 +190,29 @@ function onPositionError(err) {
 function classifyState(point) {
   const speedKmh = (point.speed || 0) * 3.6;
   const altChange = getRecentAltitudeChange();
+  const altTrend = getAltitudeTrend();     // broader view to cut through GPS jitter
 
   if (speedKmh < SPEED_MOVING) {
     return STATES.REST;
-  } else if (speedKmh >= SPEED_DOWNHILL && altChange < -ALT_CHANGE_THRESHOLD) {
-    return STATES.DOWNHILL;
-  } else if (altChange > ALT_CHANGE_THRESHOLD) {
-    return STATES.LIFT;
-  } else if (speedKmh >= SPEED_DOWNHILL) {
-    return STATES.DOWNHILL;
-  } else if (speedKmh >= SPEED_MOVING) {
-    return altChange > 0 ? STATES.LIFT : currentState;
   }
+
+  // Altitude trend is the strongest signal: if clearly ascending, it's a lift
+  // regardless of speed (chairlifts can be fast)
+  if (altTrend > ALT_CHANGE_THRESHOLD) {
+    return STATES.LIFT;
+  }
+
+  // Clearly descending + fast = downhill
+  if (altTrend < -ALT_CHANGE_THRESHOLD && speedKmh >= SPEED_DOWNHILL) {
+    return STATES.DOWNHILL;
+  }
+
+  // High speed + recent descent = downhill (flat sections of a run)
+  if (speedKmh >= SPEED_DOWNHILL && altChange <= 0) {
+    return STATES.DOWNHILL;
+  }
+
+  // Moderate speed, ambiguous altitude — keep current state to avoid flapping
   return currentState;
 }
 
@@ -238,6 +250,28 @@ function getRecentAltitudeChange() {
   if (alts.length < 2) return 0;
 
   return alts[alts.length - 1] - alts[0];
+}
+
+// Broader altitude trend using a larger window + linear regression slope
+// to smooth out GPS altitude jitter
+function getAltitudeTrend() {
+  const recent = positionHistory.slice(-TREND_WINDOW);
+  const alts = recent.filter(p => p.alt !== null && p.alt !== undefined).map(p => p.alt);
+  if (alts.length < 3) return 0;
+
+  // Simple linear regression to get the overall direction
+  const n = alts.length;
+  let sumX = 0, sumY = 0, sumXY = 0, sumXX = 0;
+  for (let i = 0; i < n; i++) {
+    sumX += i;
+    sumY += alts[i];
+    sumXY += i * alts[i];
+    sumXX += i * i;
+  }
+  const slope = (n * sumXY - sumX * sumY) / (n * sumXX - sumX * sumX);
+
+  // Return total altitude change implied by the slope over the window
+  return slope * (n - 1);
 }
 
 function transitionState(newState) {
