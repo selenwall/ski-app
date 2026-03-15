@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <title>Ski Tracker</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <link rel="manifest" href="manifest.json">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div id="app">
+    <!-- Top bar -->
+    <header id="header">
+      <h1>Ski Tracker</h1>
+      <div id="status-bar">
+        <span id="current-state" class="state-badge rest">REST</span>
+        <span id="altitude-display">-- m</span>
+        <span id="speed-display">-- km/h</span>
+      </div>
+    </header>
+
+    <!-- Tab navigation -->
+    <nav id="tabs">
+      <button class="tab active" data-tab="map">Map</button>
+      <button class="tab" data-tab="timeline">Timeline</button>
+      <button class="tab" data-tab="stats">Stats</button>
+    </nav>
+
+    <!-- Map view -->
+    <section id="map-view" class="tab-content active">
+      <div id="map"></div>
+    </section>
+
+    <!-- Timeline view -->
+    <section id="timeline-view" class="tab-content">
+      <div id="timeline"></div>
+    </section>
+
+    <!-- Stats view -->
+    <section id="stats-view" class="tab-content">
+      <div class="stats-grid">
+        <div class="stat-card">
+          <div class="stat-label">Total Time</div>
+          <div class="stat-value" id="stat-total-time">00:00:00</div>
+        </div>
+        <div class="stat-card downhill">
+          <div class="stat-label">Downhill Time</div>
+          <div class="stat-value" id="stat-downhill-time">00:00:00</div>
+        </div>
+        <div class="stat-card lift">
+          <div class="stat-label">Lift Time</div>
+          <div class="stat-value" id="stat-lift-time">00:00:00</div>
+        </div>
+        <div class="stat-card rest">
+          <div class="stat-label">Rest Time</div>
+          <div class="stat-value" id="stat-rest-time">00:00:00</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">Max Speed</div>
+          <div class="stat-value" id="stat-max-speed">0 km/h</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">Total Vertical</div>
+          <div class="stat-value" id="stat-total-vertical">0 m</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">Runs</div>
+          <div class="stat-value" id="stat-runs">0</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">Top Altitude</div>
+          <div class="stat-value" id="stat-top-altitude">-- m</div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Bottom controls -->
+    <footer id="controls">
+      <button id="btn-start" class="btn btn-start">Start Tracking</button>
+      <button id="btn-stop" class="btn btn-stop hidden">Stop Tracking</button>
+      <div id="wake-lock-status"></div>
+    </footer>
+  </div>
+
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
