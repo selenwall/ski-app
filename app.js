@@ -3,10 +3,12 @@
 const STATES = { REST: 'rest', LIFT: 'lift', DOWNHILL: 'downhill' };
 
 // Thresholds for automatic state detection
-const SPEED_MOVING = 1.5;       // km/h — above this you're not resting
-const SPEED_DOWNHILL = 8;       // km/h — above this while descending = downhill
-const ALT_CHANGE_THRESHOLD = 3; // meters over sample window to count as ascending/descending
-const SAMPLE_WINDOW = 5;        // number of recent positions to average altitude change
+const SPEED_MOVING = 2.5;       // km/h — above this you're not resting
+const SPEED_DOWNHILL = 10;      // km/h — above this while descending = downhill
+const ALT_CHANGE_THRESHOLD = 5; // meters over sample window to count as ascending/descending
+const SAMPLE_WINDOW = 8;        // number of recent positions to average altitude change
+const DEBOUNCE_COUNT = 3;       // consecutive readings needed before state change
+const MIN_SEGMENT_DURATION = 15000; // 15s — segments shorter than this get merged back
 
 // ── State ────────────────────────────────────────────────────────────────────
 let tracking = false;
@@ -17,6 +19,8 @@ let positionHistory = [];    // { lat, lng, alt, speed, time }
 let segments = [];           // { state, startTime, endTime, positions[], altStart, altEnd }
 let currentSegment = null;
 let currentState = STATES.REST;
+let pendingState = null;        // state we're debouncing towards
+let pendingCount = 0;           // how many consecutive readings agree
 let startTime = null;
 let updateInterval = null;
 
@@ -181,28 +185,48 @@ function onPositionError(err) {
   console.warn('Geolocation error:', err.message);
 }
 
-// ── State detection ──────────────────────────────────────────────────────────
-function detectState(point) {
+// ── State detection (debounced) ──────────────────────────────────────────────
+function classifyState(point) {
   const speedKmh = (point.speed || 0) * 3.6;
   const altChange = getRecentAltitudeChange();
-  let newState = currentState;
 
   if (speedKmh < SPEED_MOVING) {
-    newState = STATES.REST;
+    return STATES.REST;
   } else if (speedKmh >= SPEED_DOWNHILL && altChange < -ALT_CHANGE_THRESHOLD) {
-    newState = STATES.DOWNHILL;
+    return STATES.DOWNHILL;
   } else if (altChange > ALT_CHANGE_THRESHOLD) {
-    newState = STATES.LIFT;
+    return STATES.LIFT;
   } else if (speedKmh >= SPEED_DOWNHILL) {
-    // Fast but no clear altitude change — likely downhill on flat section
-    newState = STATES.DOWNHILL;
+    return STATES.DOWNHILL;
   } else if (speedKmh >= SPEED_MOVING) {
-    // Slow movement — could be lift or walking
-    newState = altChange > 0 ? STATES.LIFT : currentState;
+    return altChange > 0 ? STATES.LIFT : currentState;
+  }
+  return currentState;
+}
+
+function detectState(point) {
+  const newState = classifyState(point);
+
+  if (newState === currentState) {
+    // Reset debounce — we're stable
+    pendingState = null;
+    pendingCount = 0;
+    return;
   }
 
-  if (newState !== currentState) {
-    transitionState(newState);
+  // Different state detected — count consecutive agreements
+  if (newState === pendingState) {
+    pendingCount++;
+  } else {
+    pendingState = newState;
+    pendingCount = 1;
+  }
+
+  // Only transition after DEBOUNCE_COUNT consecutive readings agree
+  if (pendingCount >= DEBOUNCE_COUNT) {
+    transitionState(pendingState);
+    pendingState = null;
+    pendingCount = 0;
   }
 }
 
@@ -228,7 +252,21 @@ function transitionState(newState) {
       currentSegment.altStart = alts.length ? alts[0] : null;
       currentSegment.altEnd = alts.length ? alts[alts.length - 1] : null;
     }
-    segments.push({ ...currentSegment });
+
+    const segDuration = currentSegment.endTime - currentSegment.startTime;
+
+    // If the closing segment was too short, merge it into the previous one
+    // instead of creating a tiny blip in the timeline
+    if (segDuration < MIN_SEGMENT_DURATION && segments.length > 0) {
+      const prev = segments[segments.length - 1];
+      prev.endTime = currentSegment.endTime;
+      prev.positions.push(...currentSegment.positions);
+      // Update altEnd on merged segment
+      const mergedAlts = prev.positions.filter(p => p.alt != null).map(p => p.alt);
+      if (mergedAlts.length) prev.altEnd = mergedAlts[mergedAlts.length - 1];
+    } else {
+      segments.push({ ...currentSegment });
+    }
   }
 
   currentState = newState;
