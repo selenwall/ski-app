@@ -10,6 +10,8 @@ const SAMPLE_WINDOW = 8;        // number of recent positions to average altitud
 const TREND_WINDOW = 15;        // broader window for overall altitude trend
 const DEBOUNCE_COUNT = 3;       // consecutive readings needed before state change
 const MIN_SEGMENT_DURATION = 15000; // 15s — segments shorter than this get merged back
+const MIN_LIFT_ALT_GAIN = 10;   // meters — a lift segment must gain at least this to be real
+const MIN_LIFT_RATE = 0.5;      // m/min — minimum altitude gain rate to count as a real lift
 
 // ── State ────────────────────────────────────────────────────────────────────
 let tracking = false;
@@ -197,8 +199,10 @@ function classifyState(point) {
   }
 
   // Altitude trend is the strongest signal: if clearly ascending, it's a lift
-  // regardless of speed (chairlifts can be fast)
-  if (altTrend > ALT_CHANGE_THRESHOLD) {
+  // regardless of speed (chairlifts can be fast).
+  // But require meaningful speed too — GPS drift can show slight altitude gain
+  // while standing still, so low-speed + small altitude gain = still resting.
+  if (altTrend > ALT_CHANGE_THRESHOLD && speedKmh >= 5) {
     return STATES.LIFT;
   }
 
@@ -623,61 +627,83 @@ function loadSession() {
 }
 
 // ── Segment cleanup (retroactive jitter removal) ────────────────────────────
+
+// Helper: merge seg into prev
+function absorbSegment(prev, seg) {
+  prev.endTime = seg.endTime;
+  if (seg.positions) prev.positions = (prev.positions || []).concat(seg.positions);
+  const alts = (prev.positions || []).filter(p => p.alt != null).map(p => p.alt);
+  if (alts.length) {
+    prev.altStart = alts[0];
+    prev.altEnd = alts[alts.length - 1];
+  }
+}
+
+// Helper: merge consecutive same-state segments
+function mergeSameState(segs) {
+  if (segs.length < 2) return segs;
+  const out = [segs[0]];
+  for (let i = 1; i < segs.length; i++) {
+    if (segs[i].state === out[out.length - 1].state) {
+      absorbSegment(out[out.length - 1], segs[i]);
+    } else {
+      out.push(segs[i]);
+    }
+  }
+  return out;
+}
+
 function cleanupSegments(segs) {
   if (segs.length < 2) return segs;
 
-  // Pass 1: merge short segments into their neighbors
-  // A short segment gets absorbed by the longer neighbor on either side
-  let cleaned = [segs[0]];
-  for (let i = 1; i < segs.length; i++) {
-    const seg = segs[i];
-    const duration = (seg.endTime || 0) - (seg.startTime || 0);
-    const prev = cleaned[cleaned.length - 1];
+  // Pass 1: demote fake LIFT segments to REST
+  // A "lift" with negligible altitude gain is just GPS drift while resting
+  for (const seg of segs) {
+    if (seg.state !== STATES.LIFT) continue;
+    const alts = (seg.positions || []).filter(p => p.alt != null).map(p => p.alt);
+    const altGain = alts.length >= 2 ? alts[alts.length - 1] - alts[0] : 0;
+    const duration = ((seg.endTime || 0) - (seg.startTime || 0)) / 60000; // minutes
+    const rate = duration > 0 ? altGain / duration : 0;
 
-    if (duration < MIN_SEGMENT_DURATION) {
-      // Absorb into previous segment
-      prev.endTime = seg.endTime;
-      if (seg.positions) prev.positions = (prev.positions || []).concat(seg.positions);
-      const alts = (prev.positions || []).filter(p => p.alt != null).map(p => p.alt);
-      if (alts.length) prev.altEnd = alts[alts.length - 1];
-    } else {
-      cleaned.push(seg);
+    if (altGain < MIN_LIFT_ALT_GAIN || rate < MIN_LIFT_RATE) {
+      seg.state = STATES.REST;
     }
   }
 
-  // Pass 2: merge consecutive segments with the same state
-  const merged = [cleaned[0]];
-  for (let i = 1; i < cleaned.length; i++) {
-    const seg = cleaned[i];
-    const prev = merged[merged.length - 1];
+  // Pass 2: merge consecutive same-state (collapses REST-REST-REST chains)
+  let result = mergeSameState(segs);
 
-    if (seg.state === prev.state) {
-      prev.endTime = seg.endTime;
-      if (seg.positions) prev.positions = (prev.positions || []).concat(seg.positions);
-      const alts = (prev.positions || []).filter(p => p.alt != null).map(p => p.alt);
-      if (alts.length) {
-        prev.altStart = alts[0];
-        prev.altEnd = alts[alts.length - 1];
+  // Pass 3: absorb short segments into neighbors
+  let changed = true;
+  while (changed) {
+    changed = false;
+    const next = [result[0]];
+    for (let i = 1; i < result.length; i++) {
+      const seg = result[i];
+      const duration = (seg.endTime || 0) - (seg.startTime || 0);
+      if (duration < MIN_SEGMENT_DURATION) {
+        absorbSegment(next[next.length - 1], seg);
+        changed = true;
+      } else {
+        next.push(seg);
       }
-    } else {
-      merged.push(seg);
     }
+    result = mergeSameState(next);
   }
 
-  // Pass 3: re-classify segments using altitude trend from their positions
-  for (const seg of merged) {
+  // Pass 4: re-classify using overall segment data
+  for (const seg of result) {
     if (!seg.positions || seg.positions.length < 3) continue;
     const alts = seg.positions.filter(p => p.alt != null).map(p => p.alt);
     if (alts.length < 3) continue;
 
     const totalAltChange = alts[alts.length - 1] - alts[0];
-    const duration = (seg.endTime || 0) - (seg.startTime || 0);
     const speeds = seg.positions.filter(p => p.speed != null).map(p => p.speed * 3.6);
     const avgSpeed = speeds.length ? speeds.reduce((a, b) => a + b, 0) / speeds.length : 0;
 
-    if (avgSpeed < SPEED_MOVING) {
+    if (avgSpeed < SPEED_MOVING && Math.abs(totalAltChange) < MIN_LIFT_ALT_GAIN) {
       seg.state = STATES.REST;
-    } else if (totalAltChange > ALT_CHANGE_THRESHOLD) {
+    } else if (totalAltChange > MIN_LIFT_ALT_GAIN && avgSpeed >= 5) {
       seg.state = STATES.LIFT;
     } else if (totalAltChange < -ALT_CHANGE_THRESHOLD && avgSpeed >= SPEED_DOWNHILL) {
       seg.state = STATES.DOWNHILL;
@@ -686,26 +712,8 @@ function cleanupSegments(segs) {
     }
   }
 
-  // Pass 4: merge consecutive same-state segments again after reclassification
-  const final = [merged[0]];
-  for (let i = 1; i < merged.length; i++) {
-    const seg = merged[i];
-    const prev = final[final.length - 1];
-
-    if (seg.state === prev.state) {
-      prev.endTime = seg.endTime;
-      if (seg.positions) prev.positions = (prev.positions || []).concat(seg.positions);
-      const alts = (prev.positions || []).filter(p => p.alt != null).map(p => p.alt);
-      if (alts.length) {
-        prev.altStart = alts[0];
-        prev.altEnd = alts[alts.length - 1];
-      }
-    } else {
-      final.push(seg);
-    }
-  }
-
-  return final;
+  // Pass 5: final same-state merge
+  return mergeSameState(result);
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
